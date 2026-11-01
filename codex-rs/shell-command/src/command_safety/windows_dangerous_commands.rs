@@ -4,30 +4,41 @@ use regex::Regex;
 use shlex::split as shlex_split;
 use url::Url;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WindowsDangerousMatch {
+    UrlLaunch,
+    ForceDelete,
+}
+
+#[cfg(test)]
 pub fn is_dangerous_command_windows(command: &[String]) -> bool {
+    dangerous_command_windows_match(command).is_some()
+}
+
+pub(crate) fn dangerous_command_windows_match(command: &[String]) -> Option<WindowsDangerousMatch> {
     // Prefer structured parsing for PowerShell/CMD so we can spot URL-bearing
     // invocations of ShellExecute-style entry points before falling back to
     // simple argv heuristics.
-    if is_dangerous_powershell(command) {
-        return true;
+    if let Some(matched) = is_dangerous_powershell(command) {
+        return Some(matched);
     }
 
-    if is_dangerous_cmd(command) {
-        return true;
+    if let Some(matched) = is_dangerous_cmd(command) {
+        return Some(matched);
     }
 
     is_direct_gui_launch(command)
 }
 
-fn is_dangerous_powershell(command: &[String]) -> bool {
+fn is_dangerous_powershell(command: &[String]) -> Option<WindowsDangerousMatch> {
     let Some((exe, rest)) = command.split_first() else {
-        return false;
+        return None;
     };
     if !is_powershell_executable(exe) {
-        return false;
+        return None;
     }
     let Some(parsed) = parse_powershell_invocation(rest) else {
-        return false;
+        return None;
     };
 
     if let Some(script) = parsed.script
@@ -36,9 +47,9 @@ fn is_dangerous_powershell(command: &[String]) -> bool {
     {
         return commands
             .iter()
-            .any(|words| is_dangerous_powershell_literal_words(words));
+            .find_map(|words| dangerous_powershell_literal_words_match(words));
     }
-    is_dangerous_powershell_words(&parsed.tokens)
+    dangerous_powershell_words_match(&parsed.tokens)
 }
 
 /// Whether strictly lowered commands can be classified independently of the rest of the script.
@@ -81,11 +92,22 @@ enum PowerShellCommandKind {
     IndependentLiteral,
 }
 
-pub(crate) fn is_dangerous_powershell_words(words: &[String]) -> bool {
+pub(crate) fn dangerous_powershell_words_match(words: &[String]) -> Option<WindowsDangerousMatch> {
     classify_powershell_words(words, PowerShellCommandKind::Opaque)
 }
 
-pub(crate) fn is_dangerous_powershell_literal_words(words: &[String]) -> bool {
+pub(crate) fn dangerous_powershell_literal_words_match(
+    words: &[String],
+) -> Option<WindowsDangerousMatch> {
+    if words
+        .first()
+        .and_then(|word| executable_basename(word))
+        .as_deref()
+        == Some("cmd.exe")
+        && let Some(matched) = is_dangerous_cmd(words)
+    {
+        return Some(matched);
+    }
     // Shell and terminal wrappers can interpret later words as commands, including `start`.
     let kind = if words.first().is_some_and(|word| {
         is_powershell_executable(word)
@@ -101,7 +123,10 @@ pub(crate) fn is_dangerous_powershell_literal_words(words: &[String]) -> bool {
     classify_powershell_words(words, kind)
 }
 
-fn classify_powershell_words(words: &[String], kind: PowerShellCommandKind) -> bool {
+fn classify_powershell_words(
+    words: &[String],
+    kind: PowerShellCommandKind,
+) -> Option<WindowsDangerousMatch> {
     let tokens_lc: Vec<String> = words
         .iter()
         .map(|t| t.trim_matches('\'').trim_matches('"').to_ascii_lowercase())
@@ -119,7 +144,7 @@ fn classify_powershell_words(words: &[String], kind: PowerShellCommandKind) -> b
                 || t.contains("invoke-item")
         })
     {
-        return true;
+        return Some(WindowsDangerousMatch::UrlLaunch);
     }
 
     if has_url
@@ -127,43 +152,43 @@ fn classify_powershell_words(words: &[String], kind: PowerShellCommandKind) -> b
             .iter()
             .any(|t| t.contains("shellexecute") || t.contains("shell.application"))
     {
-        return true;
+        return Some(WindowsDangerousMatch::UrlLaunch);
     }
 
-    if let Some(first) = tokens_lc.first() {
+    if let Some(first) = tokens_lc.first().and_then(|word| executable_basename(word)) {
         // Legacy ShellExecute path via url.dll
-        if first == "rundll32"
+        if matches!(first.as_str(), "rundll32" | "rundll32.exe")
             && tokens_lc
                 .iter()
                 .any(|t| t.contains("url.dll,fileprotocolhandler"))
             && has_url
         {
-            return true;
+            return Some(WindowsDangerousMatch::UrlLaunch);
         }
-        if first == "mshta" && has_url {
-            return true;
+        if matches!(first.as_str(), "mshta" | "mshta.exe") && has_url {
+            return Some(WindowsDangerousMatch::UrlLaunch);
         }
-        if is_browser_executable(first) && has_url {
-            return true;
+        if is_browser_executable(&first) && has_url {
+            return Some(WindowsDangerousMatch::UrlLaunch);
         }
         if matches!(first.as_str(), "explorer" | "explorer.exe") && has_url {
-            return true;
+            return Some(WindowsDangerousMatch::UrlLaunch);
         }
     }
 
     // Check for force delete operations (e.g., Remove-Item -Force)
-    has_force_delete_cmdlet(&tokens_lc)
+    has_force_delete_cmdlet(&tokens_lc).then_some(WindowsDangerousMatch::ForceDelete)
 }
 
-fn is_dangerous_cmd(command: &[String]) -> bool {
+fn is_dangerous_cmd(command: &[String]) -> Option<WindowsDangerousMatch> {
     let Some((exe, rest)) = command.split_first() else {
-        return false;
+        return None;
     };
     let Some(base) = executable_basename(exe) else {
-        return false;
+        return None;
     };
     if base != "cmd" && base != "cmd.exe" {
-        return false;
+        return None;
     }
 
     let mut iter = rest.iter();
@@ -173,13 +198,13 @@ fn is_dangerous_cmd(command: &[String]) -> bool {
             "/c" | "/r" | "-c" => break,
             _ if lower.starts_with('/') => continue,
             // Unknown tokens before the command body => bail.
-            _ => return false,
+            _ => return None,
         }
     }
 
     let remaining: Vec<String> = iter.cloned().collect();
     if remaining.is_empty() {
-        return false;
+        return None;
     }
 
     let cmd_tokens: Vec<String> = match remaining.as_slice() {
@@ -196,46 +221,46 @@ fn is_dangerous_cmd(command: &[String]) -> bool {
     const CMD_SEPARATORS: &[&str] = &["&", "&&", "|", "||"];
     tokens
         .split(|t| CMD_SEPARATORS.contains(&t.as_str()))
-        .any(|segment| {
+        .find_map(|segment| {
             let Some(cmd) = segment.first() else {
-                return false;
+                return None;
             };
 
             // Classic `cmd /c ... start https://...` ShellExecute path.
             if cmd.eq_ignore_ascii_case("start") && args_have_url(segment) {
-                return true;
+                return Some(WindowsDangerousMatch::UrlLaunch);
             }
             // Force delete: del /f, erase /f
             if (cmd.eq_ignore_ascii_case("del") || cmd.eq_ignore_ascii_case("erase"))
                 && has_force_flag_cmd(segment)
             {
-                return true;
+                return Some(WindowsDangerousMatch::ForceDelete);
             }
             // Recursive directory removal: rd /s /q, rmdir /s /q
             if (cmd.eq_ignore_ascii_case("rd") || cmd.eq_ignore_ascii_case("rmdir"))
                 && has_recursive_flag_cmd(segment)
                 && has_quiet_flag_cmd(segment)
             {
-                return true;
+                return Some(WindowsDangerousMatch::ForceDelete);
             }
-            false
+            None
         })
 }
 
-fn is_direct_gui_launch(command: &[String]) -> bool {
+fn is_direct_gui_launch(command: &[String]) -> Option<WindowsDangerousMatch> {
     let Some((exe, rest)) = command.split_first() else {
-        return false;
+        return None;
     };
     let Some(base) = executable_basename(exe) else {
-        return false;
+        return None;
     };
 
     // Explorer/rundll32/mshta or direct browser exe with a URL anywhere in args.
     if matches!(base.as_str(), "explorer" | "explorer.exe") && args_have_url(rest) {
-        return true;
+        return Some(WindowsDangerousMatch::UrlLaunch);
     }
     if matches!(base.as_str(), "mshta" | "mshta.exe") && args_have_url(rest) {
-        return true;
+        return Some(WindowsDangerousMatch::UrlLaunch);
     }
     if (base == "rundll32" || base == "rundll32.exe")
         && rest.iter().any(|t| {
@@ -244,13 +269,13 @@ fn is_direct_gui_launch(command: &[String]) -> bool {
         })
         && args_have_url(rest)
     {
-        return true;
+        return Some(WindowsDangerousMatch::UrlLaunch);
     }
     if is_browser_executable(&base) && args_have_url(rest) {
-        return true;
+        return Some(WindowsDangerousMatch::UrlLaunch);
     }
 
-    false
+    None
 }
 
 fn split_embedded_cmd_operators(token: &str) -> Vec<String> {
@@ -535,6 +560,76 @@ mod tests {
             "powershell",
             "-Command",
             "Start-Process notepad.exe"
+        ])));
+    }
+
+    #[test]
+    fn powershell_python_cli_start_with_origin_url_is_not_flagged() {
+        let script = "& 'C:\\Python\\python.exe' tools/operator-api/client.py --origin http://127.0.0.1:51104 start account --target steam-only";
+        assert!(!is_dangerous_command_windows(&vec_str(&[
+            "pwsh",
+            "-NoProfile",
+            "-Command",
+            script,
+        ])));
+    }
+
+    #[test]
+    fn powershell_called_start_process_url_is_dangerous() {
+        assert!(is_dangerous_command_windows(&vec_str(&[
+            "pwsh",
+            "-Command",
+            "& 'Start-Process' 'https://example.com'",
+        ])));
+    }
+
+    #[test]
+    fn powershell_called_cmd_start_url_is_dangerous() {
+        assert!(is_dangerous_command_windows(&vec_str(&[
+            "pwsh",
+            "-Command",
+            "& 'C:\\Windows\\System32\\cmd.exe' /c start https://example.com",
+        ])));
+    }
+
+    #[test]
+    fn powershell_called_cmd_start_url_in_single_argument_is_dangerous() {
+        assert!(is_dangerous_command_windows(&vec_str(&[
+            "pwsh",
+            "-Command",
+            "& 'C:\\Windows\\System32\\cmd.exe' /c 'start https://example.com'",
+        ])));
+    }
+
+    #[test]
+    fn powershell_called_browser_url_is_dangerous() {
+        assert!(is_dangerous_command_windows(&vec_str(&[
+            "pwsh",
+            "-Command",
+            "& 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe' https://example.com",
+        ])));
+    }
+
+    #[test]
+    fn powershell_python_cli_followed_by_url_launch_is_dangerous() {
+        assert!(is_dangerous_command_windows(&vec_str(&[
+            "pwsh",
+            "-Command",
+            "& 'C:\\Python\\python.exe' tools/operator-api/client.py --origin http://127.0.0.1:51104 start account; Start-Process https://example.com",
+        ])));
+    }
+
+    #[test]
+    fn direct_python_cli_start_with_origin_url_is_not_flagged() {
+        assert!(!is_dangerous_command_windows(&vec_str(&[
+            "C:\\Python\\python.exe",
+            "tools/operator-api/client.py",
+            "--origin",
+            "http://127.0.0.1:51104",
+            "start",
+            "account",
+            "--target",
+            "steam-only",
         ])));
     }
 

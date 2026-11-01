@@ -1440,6 +1440,24 @@ fn forced_rm_rejected_prompt_reason_does_not_repeat_command() {
     );
 }
 
+#[test]
+fn windows_danger_rejected_prompt_reason_identifies_rule() {
+    assert_eq!(
+        derive_rejected_prompt_reason(
+            REJECT_SANDBOX_APPROVAL_REASON,
+            Some(DangerousCommandMatch::WindowsUrlLaunch),
+        ),
+        "Windows URL launch blocked by dangerous-command heuristic"
+    );
+    assert_eq!(
+        derive_rejected_prompt_reason(
+            REJECT_SANDBOX_APPROVAL_REASON,
+            Some(DangerousCommandMatch::WindowsForceDelete),
+        ),
+        "Windows force-delete blocked by dangerous-command heuristic"
+    );
+}
+
 #[tokio::test]
 async fn mixed_rule_and_sandbox_prompt_prioritizes_rule_for_rejection_decision() {
     let policy_src = r#"prefix_rule(pattern=["git"], decision="prompt")"#;

@@ -1,6 +1,7 @@
 use crate::bash::parse_shell_lc_literal_commands;
 #[path = "windows_dangerous_commands.rs"]
 mod windows_dangerous_commands;
+use windows_dangerous_commands::WindowsDangerousMatch;
 pub use windows_dangerous_commands::powershell_commands_are_independent;
 
 /// The platform whose command semantics should be used for safety checks.
@@ -28,8 +29,19 @@ impl DangerousCommandPlatform {
 pub enum DangerousCommandMatch {
     /// An `rm` invocation includes the force option.
     ForcedRm,
+    /// Windows-команда открывает URL через оболочку или GUI.
+    WindowsUrlLaunch,
+    /// Windows-команда выполняет принудительное удаление.
+    WindowsForceDelete,
     /// Another dangerous-command rule matched.
     Other,
+}
+
+fn windows_match_to_dangerous_match(matched: WindowsDangerousMatch) -> DangerousCommandMatch {
+    match matched {
+        WindowsDangerousMatch::UrlLaunch => DangerousCommandMatch::WindowsUrlLaunch,
+        WindowsDangerousMatch::ForceDelete => DangerousCommandMatch::WindowsForceDelete,
+    }
 }
 
 const MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH: usize = 8;
@@ -72,10 +84,9 @@ fn dangerous_command_match_with_depth(
         return Some(dangerous_match);
     }
 
-    if platform == DangerousCommandPlatform::Windows
-        && windows_dangerous_commands::is_dangerous_command_windows(command)
-    {
-        return Some(DangerousCommandMatch::Other);
+    if platform == DangerousCommandPlatform::Windows {
+        return windows_dangerous_commands::dangerous_command_windows_match(command)
+            .map(windows_match_to_dangerous_match);
     }
 
     None
@@ -87,8 +98,8 @@ pub fn dangerous_powershell_words_match(
     platform: DangerousCommandPlatform,
 ) -> Option<DangerousCommandMatch> {
     if platform == DangerousCommandPlatform::Windows {
-        windows_dangerous_commands::is_dangerous_powershell_words(command)
-            .then_some(DangerousCommandMatch::Other)
+        windows_dangerous_commands::dangerous_powershell_words_match(command)
+            .map(windows_match_to_dangerous_match)
     } else {
         None
     }
@@ -98,8 +109,8 @@ pub fn dangerous_powershell_words_match(
 pub fn dangerous_powershell_literal_words_match(
     command: &[String],
 ) -> Option<DangerousCommandMatch> {
-    windows_dangerous_commands::is_dangerous_powershell_literal_words(command)
-        .then_some(DangerousCommandMatch::Other)
+    windows_dangerous_commands::dangerous_powershell_literal_words_match(command)
+        .map(windows_match_to_dangerous_match)
 }
 
 fn executable_name_lookup_key(raw: &str, platform: DangerousCommandPlatform) -> Option<String> {
@@ -314,13 +325,13 @@ mod tests {
     }
 
     #[test]
-    fn direct_powershell_words_return_other_match_on_windows() {
+    fn direct_powershell_words_return_force_delete_match_on_windows() {
         let command = vec_str(&["Remove-Item", "test", "-Force"]);
 
         if cfg!(windows) {
             assert_eq!(
                 dangerous_powershell_words_match(&command, DangerousCommandPlatform::host()),
-                Some(DangerousCommandMatch::Other)
+                Some(DangerousCommandMatch::WindowsForceDelete)
             );
         } else {
             assert_eq!(

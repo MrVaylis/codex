@@ -596,7 +596,9 @@ async fn powershell_independent_literal_commands_preserve_url_launch_checks() ->
                 assert!(output.contains(expected_output), "{script}: {output}");
             }
             None => assert!(
-                output.contains("rejected: blocked by policy"),
+                output.contains(
+                    "rejected: Windows URL launch blocked by dangerous-command heuristic"
+                ),
                 "{script}: {output}"
             ),
         }

@@ -1143,7 +1143,15 @@ fn derive_forbidden_reason(
         None => {
             if let Some(dangerous_command_match) = dangerous_command_match {
                 let reason = dangerous_command_rejection_reason(dangerous_command_match);
-                format!("`{command}` rejected: {reason}")
+                if matches!(
+                    dangerous_command_match,
+                    DangerousCommandMatch::WindowsUrlLaunch
+                        | DangerousCommandMatch::WindowsForceDelete
+                ) {
+                    format!("command rejected: {reason}")
+                } else {
+                    format!("`{command}` rejected: {reason}")
+                }
             } else {
                 format!("`{command}` rejected: blocked by policy")
             }
@@ -1156,9 +1164,11 @@ fn derive_rejected_prompt_reason(
     dangerous_command_match: Option<DangerousCommandMatch>,
 ) -> String {
     match dangerous_command_match {
-        Some(dangerous_command_match @ DangerousCommandMatch::ForcedRm) => {
-            dangerous_command_rejection_reason(dangerous_command_match).to_string()
-        }
+        Some(
+            dangerous_command_match @ (DangerousCommandMatch::ForcedRm
+            | DangerousCommandMatch::WindowsUrlLaunch
+            | DangerousCommandMatch::WindowsForceDelete),
+        ) => dangerous_command_rejection_reason(dangerous_command_match).to_string(),
         Some(DangerousCommandMatch::Other) | None => fallback_reason.to_string(),
     }
 }
@@ -1169,6 +1179,12 @@ fn dangerous_command_rejection_reason(
     match dangerous_command_match {
         DangerousCommandMatch::ForcedRm => {
             "rm -f style commands are not permitted. Use a safer approach"
+        }
+        DangerousCommandMatch::WindowsUrlLaunch => {
+            "Windows URL launch blocked by dangerous-command heuristic"
+        }
+        DangerousCommandMatch::WindowsForceDelete => {
+            "Windows force-delete blocked by dangerous-command heuristic"
         }
         DangerousCommandMatch::Other => "blocked by policy",
     }

@@ -67,6 +67,68 @@ fn commands_for_exec_policy_parses_powershell_shell_wrapper() {
 }
 
 #[test]
+fn literal_python_call_with_origin_url_is_allowed_by_windows_heuristics() {
+    let command = vec![
+        "pwsh.exe".to_string(),
+        "-NoProfile".to_string(),
+        "-Command".to_string(),
+        "& 'C:\\Python\\python.exe' tools/operator-api/client.py --origin http://127.0.0.1:51104 start account --target steam-only".to_string(),
+    ];
+    let parsed = commands_for_exec_policy_for_platform(&command, DangerousCommandPlatform::Windows);
+    assert_eq!(
+        parsed.command_origin,
+        ExecPolicyCommandOrigin::PowerShellLiteral
+    );
+    assert_eq!(parsed.commands.len(), 1);
+    assert_eq!(parsed.commands[0][0], "C:\\Python\\python.exe");
+    assert_eq!(
+        dangerous_command_match_for_origin(
+            &parsed.commands[0],
+            parsed.command_origin,
+            DangerousCommandPlatform::Windows,
+        ),
+        None
+    );
+    assert_eq!(
+        render_decision_for_unmatched_command_for_platform(
+            &parsed.commands[0],
+            UnmatchedCommandContext {
+                approval_policy: AskForApproval::Never,
+                permission_profile: &PermissionProfile::Disabled,
+                windows_sandbox_level: WindowsSandboxLevel::Elevated,
+                sandbox_permissions: SandboxPermissions::UseDefault,
+                command_origin: parsed.command_origin,
+            },
+            DangerousCommandPlatform::Windows,
+        ),
+        Decision::Allow
+    );
+}
+
+#[tokio::test]
+async fn windows_url_rejection_reports_rule_without_echoing_arguments() {
+    assert_exec_approval_requirement_for_command(
+        ExecApprovalRequirementScenario {
+            policy_src: None,
+            command: vec![
+                "pwsh.exe".to_string(),
+                "-Command".to_string(),
+                "Start-Process 'https://example.com/?token=private-value'".to_string(),
+            ],
+            approval_policy: AskForApproval::Never,
+            permission_profile: PermissionProfile::Disabled,
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            prefix_rule: None,
+        },
+        ExecApprovalRequirement::Forbidden {
+            reason: "command rejected: Windows URL launch blocked by dangerous-command heuristic"
+                .to_string(),
+        },
+    )
+    .await;
+}
+
+#[test]
 fn unmatched_powershell_read_requires_approval_without_sandbox() {
     let command = vec!["Get-Content".to_string(), "Cargo.toml".to_string()];
 
