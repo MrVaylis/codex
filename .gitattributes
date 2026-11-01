@@ -2,3 +2,5 @@ codex-rs/app-server-protocol/schema/** linguist-generated
 codex-rs/hooks/schema/generated/** linguist-generated
 third_party/voice/sources.json text eol=lf
 patches/v8_array_sort_elements_kind.patch text eol=lf
+# sqlx хранит checksum сырых байт миграций; в БД Codex на Windows они посчитаны от CRLF
+codex-rs/state/*migrations/** text eol=crlf
