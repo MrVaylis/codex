@@ -11,7 +11,31 @@ use tree_sitter::Parser;
 /// at. The accepted CST shapes intentionally cover only common literal command forms; rare
 /// PowerShell syntax and value-conversion cases stay opaque.
 pub(crate) fn try_parse_powershell_commands(script: &str) -> Option<Vec<Vec<String>>> {
-    lower_with_tree_sitter(script).ok()
+    lower_with_tree_sitter(script)
+        .or_else(|_| lower_literal_executable_call(script))
+        .ok()
+}
+
+fn lower_literal_executable_call(script: &str) -> Result<Vec<Vec<String>>, String> {
+    let script = script.trim();
+    let rest = script
+        .strip_prefix('&')
+        .ok_or_else(|| "not a call-operator invocation".to_string())?;
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return Err("call operator must precede a separate literal".to_string());
+    }
+    let rest = rest.trim_start();
+    if !(rest.starts_with('\'') || rest.starts_with('"')) {
+        return Err("call target must be a quoted literal".to_string());
+    }
+    let words = lower_command_text(rest)?;
+    if !words
+        .first()
+        .is_some_and(|target| target.to_ascii_lowercase().ends_with(".exe"))
+    {
+        return Err("call target must be a literal executable".to_string());
+    }
+    Ok(vec![words])
 }
 
 fn lower_with_tree_sitter(script: &str) -> Result<Vec<Vec<String>>, String> {

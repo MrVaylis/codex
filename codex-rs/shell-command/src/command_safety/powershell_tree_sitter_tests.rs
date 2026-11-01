@@ -35,3 +35,33 @@ fn rejects_requires_directives() {
         None
     );
 }
+
+#[test]
+fn lowers_literal_call_operator_for_external_cli() {
+    assert_eq!(
+        try_parse_powershell_commands(
+            "& 'C:\\Python\\python.exe' tools/operator-api/client.py --origin http://127.0.0.1:51104 start account --target steam-only"
+        ),
+        Some(vec![vec![
+            "C:\\Python\\python.exe".to_string(),
+            "tools/operator-api/client.py".to_string(),
+            "--origin".to_string(),
+            "http://127.0.0.1:51104".to_string(),
+            "start".to_string(),
+            "account".to_string(),
+            "--target".to_string(),
+            "steam-only".to_string(),
+        ]])
+    );
+}
+
+#[test]
+fn rejects_dynamic_and_non_executable_call_targets() {
+    for script in [
+        "& $command --origin http://127.0.0.1:51104 start",
+        "& './operator.ps1' --origin http://127.0.0.1:51104 start",
+        "& 'python.exe' --origin http://127.0.0.1:51104 start; Start-Process https://example.com",
+    ] {
+        assert_eq!(try_parse_powershell_commands(script), None, "{script}");
+    }
+}
